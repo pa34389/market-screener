@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Structure and OTE setup screener — deterministic rules, Binance and Yahoo data, local audit log." />
+  <title>Meridian Screener</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/dashboard.css?v=17" />
+  <!-- Tab icon: data URI works when /favicon.ico is cached wrong; file is filter-free SVG -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0f14'/%3E%3Cpath fill='%235eead4' d='M9 23V11l3.2 5.5L15 11v12h-1.8v-8l-3 5-3-5v8z'/%3E%3C/svg%3E" />
+  <link rel="icon" type="image/svg+xml" href="/assets/assets/favicon.svg?v=3" />
+  <link rel="icon" type="image/png" sizes="64x64" href="/favicon.ico?v=3" />
+  <link rel="apple-touch-icon" href="/assets/assets/logo-mark.png?v=1" />
+</head>
+<body>
+  <div class="app" id="appRoot">
+    <header class="site-header" role="banner">
+      <div class="site-header__row site-header__row--brand">
+        <div class="site-brand">
+          <div class="brand-mark" aria-hidden="true">
+            <img src="/assets/assets/logo-mark.png?v=1" alt="" width="40" height="40" decoding="async" />
+          </div>
+          <div class="site-brand__text">
+            <h1>Meridian Screener</h1>
+            <p class="site-tagline">HTF / LTF rules · local SQLite · not investment advice</p>
+          </div>
+        </div>
+        <div class="site-header__status">
+          <span class="status-pill" title="API /health">
+            <span class="status-dot" id="healthDot" aria-hidden="true"></span>
+            <span id="connStatus">Live workspace</span>
+          </span>
+          <span class="kbd-hint" id="kbdHints">/ focus symbol search</span>
+        </div>
+      </div>
+      <div class="site-header__row site-header__row--tools">
+        <div class="toolbar" role="toolbar" aria-label="Filters and actions">
+          <div class="input-wrap">
+            <span class="input-icon" aria-hidden="true">⌕</span>
+            <input type="search" id="filterSym" placeholder="Filter symbols…" autocomplete="off" aria-label="Filter by symbol" />
+          </div>
+          <select class="select" id="filterSetupStage" aria-label="Filter by setup stage">
+            <option value="">All setup stages</option>
+            <option value="SETUP_VALID_FOR_REVIEW">Setup valid for review</option>
+            <option value="BREAKER_RETEST_PENDING">Breaker retest pending</option>
+            <option value="INVALID_RR">Invalid RR</option>
+            <option value="INVALIDATED">Invalidated</option>
+            <option value="LIQUIDITY_SWEEP_SEEN">Liquidity sweep seen</option>
+            <option value="PRICE_INSIDE_POI">Price inside POI</option>
+            <option value="WAITING_FOR_POI">Waiting for POI</option>
+            <option value="RANGE_DEFINED">Range defined</option>
+            <option value="POI_IDENTIFIED">POI identified</option>
+            <option value="HTF_BIAS_FOUND">HTF bias found</option>
+            <option value="LTF_MSB_CONFIRMED">LTF MSB confirmed</option>
+            <option value="NO_SETUP">No setup</option>
+          </select>
+          <select class="select" id="refreshSec" aria-label="Reload desk from server">
+            <option value="0">Desk reload: off</option>
+            <option value="3600" selected>Desk reload: every hour</option>
+          </select>
+          <button type="button" class="btn btn-ghost" id="btnExport" title="Download latest scan JSON">Export JSON</button>
+          <button type="button" class="btn btn-ghost" id="btnReload">Refresh</button>
+          <button type="button" class="btn btn-primary" id="btnScan"><span id="btnScanLabel">Run scan</span></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="site-main" id="mainContent">
+        <div class="flash-bar" id="flashBar" hidden>
+          <p id="flash" class="flash" role="status" aria-live="polite"></p>
+          <button type="button" class="flash-dismiss" id="flashDismiss" aria-label="Dismiss message">×</button>
+        </div>
+        <section class="kpis kpis--compact" id="overview" aria-label="Key metrics">
+          <div class="kpi">
+            <div class="kpi-label">Total scans</div>
+            <div class="kpi-value" id="kpiTotal">—</div>
+            <div class="kpi-hint">Stored locally</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Last scan</div>
+            <div class="kpi-value kpi-value--sub" id="kpiLastId">—</div>
+            <div class="kpi-hint" id="kpiLastWhen">—</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Universe</div>
+            <div class="kpi-value" id="kpiSyms">—</div>
+            <div class="kpi-hint">Symbols in last run</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Attention</div>
+            <div class="kpi-value" id="kpiHot">—</div>
+            <div class="kpi-hint">Sweep + MSB corridor</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Review-ready</div>
+            <div class="kpi-value" id="kpiReady">—</div>
+            <div class="kpi-hint">Stage = setup valid…</div>
+          </div>
+        </section>
+
+        <section class="desk" id="desk" aria-labelledby="deskHeading">
+          <h2 id="deskHeading" class="sr-only">Latest scan grid</h2>
+          <p class="desk-runline" id="meta">Loading…</p>
+          <p class="desk-hint" id="gridHint">Filter or sort. Hover symbol for pipeline note.</p>
+              <details class="howto-banner" id="howtoTable">
+                <summary class="howto-banner__summary">
+                  <span class="howto-banner__title">How to use this table</span>
+                  <span class="howto-banner__hint">Tap to open or close</span>
+                </summary>
+                <div class="howto-banner__body">
+                  <p class="howto-banner__lead">
+                    Each row is one market we looked at. The computer checked charts with fixed rules. It does not place trades and it is not financial advice.
+                  </p>
+                  <h3 class="howto-banner__h">What each column means</h3>
+                  <ul class="howto-banner__list">
+                    <li><strong>Symbol</strong> is the short code (like a nickname).</li>
+                    <li><strong>Name</strong> tells you the real name so you do not mix things up.</li>
+                    <li>
+                      <strong>Setup stage</strong> is where we are on a simple checklist. Early stages mean “not ready yet.” Later stages mean “look closer.” The exact words come from the rules engine; hover a pill to see the raw stage code.
+                    </li>
+                    <li><strong>UI</strong> is a small color tag for what price did lately near important zones (watch, sweep, and so on).</li>
+                    <li><strong>Grade</strong> is how strong the setup looks to the rules. High grades mean the story fits more checks. “Ignore” means the rules say this row is not a focus idea.</li>
+                    <li><strong>Bias</strong> is whether the bigger picture leans up, down, or sideways.</li>
+                    <li><strong>Score</strong> is a number score from those same rules.</li>
+                    <li><strong>Price</strong> is about where price was when we ran.</li>
+                    <li><strong>RR</strong> is a risk reward style number when the math exists. If you see a dash, the math was missing.</li>
+                  </ul>
+                  <h3 class="howto-banner__h">How to use the buttons and tools</h3>
+                  <ol class="howto-banner__steps">
+                    <li>Type in the search box to shrink the list to one symbol.</li>
+                    <li>Use the stage dropdown to only show rows in one stage.</li>
+                    <li>Click a column title with arrows to sort. Click again to flip the order.</li>
+                    <li>Press <kbd class="kbd">/</kbd> on your keyboard to jump to the symbol search (when you are not typing somewhere else).</li>
+                    <li>Press <strong>Run scan</strong> when you want fresh numbers. Big lists can take a while.</li>
+                    <li>Press <strong>Refresh</strong> to reload the last saved scan from this computer’s log.</li>
+                    <li>Press <strong>Export JSON</strong> if you want the raw data file.</li>
+                  </ol>
+                  <p class="howto-banner__note">If something looks wrong, try a new scan. Data can be late or missing because free market feeds have limits.</p>
+                </div>
+              </details>
+              <div class="table-wrap table-wrap--natural">
+                <table class="data" id="signalTable">
+                  <thead>
+                    <tr>
+                      <th class="th-sortable" data-sort="symbol" scope="col">Symbol <span class="sort-ind">↕</span></th>
+                      <th class="th-sortable th-col-ticker-name" data-sort="name" scope="col" title="Full name for default universe; re-scan to refresh labels">Name <span class="sort-ind">↕</span></th>
+                      <th class="th-sortable th-col-setup" data-sort="dag" scope="col" title="Machine-readable stage in scan pipeline">Setup stage <span class="sort-ind">↕</span></th>
+                      <th scope="col">UI</th>
+                      <th scope="col">Grade</th>
+                      <th scope="col">Bias</th>
+                      <th class="th-sortable" data-sort="score" scope="col">Score <span class="sort-ind">↕</span></th>
+                      <th scope="col">Price</th>
+                      <th scope="col">RR</th>
+                    </tr>
+                  </thead>
+                  <tbody id="rows"></tbody>
+                </table>
+              </div>
+        </section>
+
+          <div class="card card--activity desk-panel--hidden" id="activity" aria-hidden="true">
+            <div class="card-head">
+              <h2>Activity log</h2>
+              <span class="card-hint">Latest events from scans and errors</span>
+            </div>
+            <div id="activityList" class="activity-feed"></div>
+          </div>
+
+        <div class="card desk-panel--hidden" id="historyPanel" style="margin-top:1.25rem" aria-hidden="true">
+          <div class="card-head">
+            <h2>Scan history</h2>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap" style="max-height:320px">
+              <table class="data" id="historyTable">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Time</th>
+                    <th>Provider</th>
+                    <th>Universe</th>
+                    <th>TF</th>
+                    <th>OK</th>
+                    <th>Err</th>
+                    <th>Ms</th>
+                  </tr>
+                </thead>
+                <tbody id="historyRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <footer class="footer-legal">
+          <strong>Disclaimer.</strong> Meridian Screener is analytics software. It does not provide investment advice or execute trades.
+          Signals are rule-based heuristics; markets can gap, invalidate, or fail. Past scans do not predict future performance.
+          Yahoo Finance data is unofficial and may be delayed. You are responsible for compliance in your jurisdiction.
+        </footer>
+    </main>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" aria-hidden="true">
+    <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" onclick="event.stopPropagation();">
+      <div class="drawer-head">
+        <h3 id="drawerTitle">Scan detail</h3>
+        <div style="display:flex;gap:0.4rem;flex-wrap:wrap">
+          <button type="button" class="btn btn-ghost" id="drawerExport" style="padding:0.35rem 0.65rem;font-size:0.72rem">Export JSON</button>
+          <button type="button" class="btn btn-ghost" id="drawerClose" style="padding:0.35rem 0.65rem">Close</button>
+        </div>
+      </div>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+  </div>
+
+  <script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let lastPayload = null;
+  let rowEls = [];
+  let currentSignals = [];
+  let sortState = { key: null, dir: 1 };
+  let flashTimer = null;
+  let filterDebounce = null;
+  let drawerSnapshot = null;
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function fmtTime(ts) {
+    if (ts == null) return "—";
+    return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
+
+  function fmtPrice(x) {
+    const n = Number(x);
+    if (!Number.isFinite(n)) return "—";
+    const a = Math.abs(n);
+    if (a >= 1000) return n.toFixed(2);
+    if (a >= 1) return n.toFixed(4);
+    return n.toPrecision(5);
+  }
+
+  /** Symbol for a grid row (DB rows use top-level `symbol`; live payloads use `payload.symbol`). */
+  function signalSymbol(s) {
+    if (!s) return "";
+    if (typeof s.symbol === "string" && s.symbol.trim()) return s.symbol.trim();
+    const p = s.payload || s;
+    const x = p && p.symbol;
+    return typeof x === "string" && x.trim() ? x.trim() : "";
+  }
+
+  /** Underscores to spaces; hyphen-safe title case per segment (setup stage, UI status, activity kind). */
+  function humanize(str) {
+    const flat = String(str || "")
+      .replace(/_/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!flat) return "—";
+    return flat
+      .split(/(\s+)/)
+      .map((part) =>
+        /\s+/.test(part)
+          ? part
+          : part
+              .split("-")
+              .map((seg) => (seg ? seg.charAt(0).toUpperCase() + seg.slice(1).toLowerCase() : ""))
+              .join("-")
+      )
+      .join("");
+  }
+
+  function displayNameForSignal(s) {
+    const p = s.payload || s;
+    const n = String(p.ticker_display_name || "").trim();
+    return n || signalSymbol(s) || "—";
+  }
+
+  function dagPillClass(dag) {
+    const d = String(dag || "");
+    if (d === "SETUP_VALID_FOR_REVIEW") return "pill pill-dag-valid";
+    if (d === "INVALID_RR" || d === "INVALIDATED") return "pill pill-dag-hot";
+    if (d === "LIQUIDITY_SWEEP_SEEN" || d === "BREAKER_RETEST_PENDING" || d === "PRICE_INSIDE_POI") return "pill pill-dag-warn";
+    return "pill pill-dag-neutral";
+  }
+
+  function gradePillClass(gradeRaw) {
+    const g = String(gradeRaw || "").toLowerCase();
+    if (g.includes("a-grade")) return "pill pill-grade-a";
+    if (g.includes("b-grade")) return "pill pill-grade-b";
+    if (g.includes("watch")) return "pill pill-grade-watch";
+    if (g.includes("ignore")) return "pill pill-grade-ignore";
+    return "pill pill-grade-neutral";
+  }
+
+  function uiPillClass(st) {
+    const k = String(st || "").replace(/\s+/g, "_");
+    if (k === "confirmed") return "pill pill-ui-confirmed";
+    if (k === "sweep_seen") return "pill pill-ui-sweep";
+    if (k === "poi_entered") return "pill pill-ui-poi";
+    if (k === "invalid") return "pill pill-ui-invalid";
+    return "pill pill-ui-watch";
+  }
+
+  function countByDag(sigs, pred) {
+    return (sigs || []).filter((s) => {
+      const p = s.payload || s;
+      const setup = p.setup || {};
+      const dag = p.dag_state || setup.state || "";
+      return pred(dag);
+    }).length;
+  }
+
+  function showFlash(msg, cls, autoDismissMs) {
+    if (flashTimer) clearTimeout(flashTimer);
+    $("flashBar").hidden = false;
+    $("flash").textContent = msg;
+    $("flash").className = "flash" + (cls ? " " + cls : "").trim();
+    if (autoDismissMs && cls === "ok") {
+      flashTimer = setTimeout(hideFlash, autoDismissMs);
+    }
+  }
+
+  function hideFlash() {
+    if (flashTimer) clearTimeout(flashTimer);
+    flashTimer = null;
+    $("flashBar").hidden = true;
+    $("flash").textContent = "";
+    $("flash").className = "flash";
+  }
+
+  async function pingHealth() {
+    const dot = $("healthDot");
+    try {
+      const r = await fetch("/health", { cache: "no-store" });
+      if (r.ok) {
+        dot.classList.add("ok");
+        dot.classList.remove("err");
+        $("connStatus").textContent = "API online";
+      } else {
+        throw new Error("bad");
+      }
+    } catch (_) {
+      dot.classList.add("err");
+      dot.classList.remove("ok");
+      $("connStatus").textContent = "API unreachable";
+    }
+  }
+
+  function rowHtmlFromSignal(s) {
+    const p = s.payload || s;
+    const setup = p.setup || {};
+    const dag = String(p.dag_state || setup.state || "—");
+    const grade = String(p.classification || setup.classification || "—");
+    const missList = (p.missing_conditions || setup.missing_conditions || []).slice(0, 5);
+    const missDisp = missList.map((c) => humanize(c)).join(" · ");
+    const rr = p.rr == null ? "—" : Number(p.rr).toFixed(2);
+    const rawSym = signalSymbol(s);
+    const sym = escapeHtml(rawSym);
+    const dagEsc = escapeHtml(dag);
+    const dagDisp = escapeHtml(humanize(dag));
+    const gradeDisp = escapeHtml(humanize(grade));
+    const statusDisp = escapeHtml(humanize(p.status || ""));
+    const biasDisp = escapeHtml(humanize(p.bias || ""));
+    const nameDisp = escapeHtml(displayNameForSignal(s));
+    const sc = Number(p.score);
+    const scoreAttr = Number.isFinite(sc) ? String(sc) : "0";
+    const symAttr = escapeHtml(rawSym);
+    const tipParts = [];
+    if (p.alert) tipParts.push(String(p.alert));
+    if (p.range_location) tipParts.push("Range: " + String(p.range_location));
+    if (missDisp && missDisp !== "—") tipParts.push("Next: " + missDisp);
+    const tipPlain = tipParts.join(" · ");
+    const symTitleAttr = tipPlain ? ` title="${escapeHtml(tipPlain)}"` : "";
+    return `<tr data-symbol="${symAttr}" data-sym="${escapeHtml(rawSym.toLowerCase())}" data-setup-stage="${dagEsc}" data-score="${scoreAttr}">
+      <td class="sym-cell"${symTitleAttr}><strong>${sym}</strong></td>
+      <td class="td-ticker-name" title="${symAttr}">${nameDisp}</td>
+      <td class="td-setup"><span class="${dagPillClass(dag)}" title="${dagEsc}">${dagDisp}</span></td>
+      <td><span class="${uiPillClass(p.status)}" title="${escapeHtml(String(p.status || ""))}">${statusDisp}</span></td>
+      <td class="td-grade"><span class="${gradePillClass(grade)}" title="${escapeHtml(grade)}">${gradeDisp}</span></td>
+      <td>${biasDisp}</td>
+      <td class="num">${escapeHtml(String(p.score ?? ""))}</td>
+      <td class="num">${escapeHtml(fmtPrice(p.current_price))}</td>
+      <td class="num">${escapeHtml(rr)}</td>
+    </tr>`;
+  }
+
+  function sortedSignals(sigs) {
+    const arr = [...(sigs || [])];
+    if (!sortState.key) return arr;
+    const k = sortState.key;
+    const m = sortState.dir;
+    arr.sort((a, b) => {
+      const pa = a.payload || a;
+      const pb = b.payload || b;
+      const sa = pa.setup || {};
+      const sb = pb.setup || {};
+      if (k === "score") return m * ((Number(pa.score) || 0) - (Number(pb.score) || 0));
+      if (k === "symbol")
+        return m * String(signalSymbol(a) || "").localeCompare(String(signalSymbol(b) || ""), undefined, { sensitivity: "base" });
+      if (k === "name")
+        return m * String(displayNameForSignal(a) || "").localeCompare(String(displayNameForSignal(b) || ""), undefined, {
+          sensitivity: "base",
+        });
+      const da = String(pa.dag_state || sa.state || "");
+      const db = String(pb.dag_state || sb.state || "");
+      return m * da.localeCompare(db);
+    });
+    return arr;
+  }
+
+  function updateSortHeaders() {
+    document.querySelectorAll("#signalTable thead th.th-sortable").forEach((th) => {
+      th.classList.toggle("is-sorted", th.getAttribute("data-sort") === sortState.key);
+      const ind = th.querySelector(".sort-ind");
+      if (!ind) return;
+      if (th.getAttribute("data-sort") === sortState.key) {
+        ind.textContent = sortState.dir === 1 ? "▲" : "▼";
+      } else {
+        ind.textContent = "↕";
+      }
+    });
+  }
+
+  function renderSignalRows(sigs) {
+    const tbody = $("rows");
+    currentSignals = [...(sigs || [])];
+    const ordered = sortedSignals(currentSignals);
+    tbody.innerHTML = ordered.map(rowHtmlFromSignal).join("");
+    rowEls = Array.from(tbody.querySelectorAll("tr"));
+    updateSortHeaders();
+    applyFilters();
+  }
+
+  async function loadStats() {
+    try {
+      const r = await fetch("/api/stats");
+      const j = await r.json();
+      $("kpiTotal").textContent = j.total_scans != null ? String(j.total_scans) : "—";
+      if (j.last_scan) {
+        $("kpiLastId").textContent = "#" + j.last_scan.id;
+        $("kpiLastWhen").textContent = fmtTime(j.last_scan.created_at) + " · " + (j.last_scan.duration_ms || 0) + " ms";
+      } else {
+        $("kpiLastId").textContent = "—";
+        $("kpiLastWhen").textContent = "No scans yet";
+      }
+    } catch (_) {
+      $("kpiTotal").textContent = "—";
+    }
+  }
+
+  async function loadActivity() {
+    const r = await fetch("/api/activity?limit=80");
+    const j = await r.json();
+    const el = $("activityList");
+    const rows = j.activity || [];
+    if (!rows.length) {
+      el.innerHTML = "<div class='empty'>No activity yet. Run a scan to populate the audit log.</div>";
+      return;
+    }
+    el.innerHTML = rows.map((a) => {
+      const kindSafe = String(a.kind || "").replace(/[^a-z0-9_-]/gi, "");
+      return `<div class="act-row kind-${kindSafe}">
+        <div class="act-body">
+          <div class="act-meta"><span class="act-time">${fmtTime(a.created_at)}</span><span class="act-kind">${escapeHtml(humanize(a.kind || ""))}</span></div>
+          <div class="msg">${escapeHtml(a.message)}</div>
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  async function loadLatest() {
+    const r = await fetch("/api/latest");
+    const j = await r.json();
+    const scan = j.scan;
+    const meta = $("meta");
+    if (!scan) {
+      lastPayload = null;
+      meta.textContent = "No scans yet. Run a full scan to seed the desk.";
+      $("rows").innerHTML = "";
+      rowEls = [];
+      currentSignals = [];
+      $("kpiSyms").textContent = "0";
+      $("kpiHot").textContent = "0";
+      $("kpiReady").textContent = "0";
+      return;
+    }
+    lastPayload = scan;
+    const sigs = scan.signals || [];
+    const hot = countByDag(sigs, (d) => d === "LIQUIDITY_SWEEP_SEEN" || d === "BREAKER_RETEST_PENDING");
+    const ready = countByDag(sigs, (d) => d === "SETUP_VALID_FOR_REVIEW");
+    $("kpiSyms").textContent = String((scan.symbols || []).length || sigs.length);
+    $("kpiHot").textContent = String(hot);
+    $("kpiReady").textContent = String(ready);
+
+    meta.innerHTML =
+      "<strong>Scan #" +
+      escapeHtml(String(scan.id)) +
+      "</strong> · " +
+      escapeHtml(fmtTime(scan.created_at)) +
+      " · <span style='color:var(--text-tertiary)'>" +
+      escapeHtml(scan.provider || "") +
+      " · " +
+      escapeHtml(scan.htf || "") +
+      " / " +
+      escapeHtml(scan.ltf || "") +
+      "</span>";
+
+    renderSignalRows(sigs);
+  }
+
+  function applyFilters() {
+    const q = ($("filterSym").value || "").trim().toLowerCase();
+    const d = ($("filterSetupStage").value || "").trim();
+    let n = 0;
+    rowEls.forEach((tr) => {
+      const sym = tr.getAttribute("data-sym") || "";
+      const dag = tr.getAttribute("data-setup-stage") || "";
+      const okSym = !q || sym.includes(q);
+      const okDag = !d || dag === d;
+      const show = okSym && okDag;
+      tr.hidden = !show;
+      if (show) n++;
+    });
+    $("gridHint").textContent = n + " rows visible";
+  }
+
+  async function loadHistory() {
+    const r = await fetch("/api/scans?limit=25");
+    const j = await r.json();
+    const tb = $("historyRows");
+    const scans = j.scans || [];
+    if (!scans.length) {
+      tb.innerHTML = "<tr><td colspan='8' class='empty' style='border:none'>No history.</td></tr>";
+      return;
+    }
+    tb.innerHTML = scans
+      .map((s) => {
+        const syms = (s.symbols || []).join(", ");
+        const short = syms.length > 48 ? syms.slice(0, 46) + "…" : syms;
+        return `<tr class="history-row" data-scan-id="${s.id}" tabindex="0" role="button" aria-label="Open scan ${s.id}">
+        <td class="num">${s.id}</td>
+        <td style="font-size:0.78rem;color:var(--text-secondary)">${escapeHtml(fmtTime(s.created_at))}</td>
+        <td>${escapeHtml(s.provider)}</td>
+        <td style="max-width:220px;font-size:0.75rem;color:var(--text-tertiary)" title="${escapeHtml(syms)}">${escapeHtml(short)}</td>
+        <td>${escapeHtml(s.htf)}/${escapeHtml(s.ltf)}</td>
+        <td class="num">${s.signal_count}</td>
+        <td class="num">${s.error_count}</td>
+        <td class="num">${s.duration_ms}</td>
+      </tr>`;
+      })
+      .join("");
+  }
+
+  function setScanning(on) {
+    $("appRoot").classList.toggle("scanning", on);
+    const btn = $("btnScan");
+    const label = $("btnScanLabel");
+    btn.disabled = on;
+    if (on) {
+      label.innerHTML = "<span class='spinner' aria-hidden='true'></span> Scanning…";
+    } else {
+      label.textContent = "Run scan";
+    }
+  }
+
+  async function runScan() {
+    setScanning(true);
+    showFlash("Running multi-feed scan (Binance + Yahoo). Large universes can take minutes.", "", 0);
+    try {
+      const r = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      showFlash(
+        "Scan #" + j.scan_id + " completed in " + j.duration_ms + " ms · " + (j.signals || []).length + " rows · " + (j.errors || []).length + " errors.",
+        "ok",
+        5000
+      );
+      await Promise.all([loadStats(), loadLatest(), loadHistory(), loadActivity()]);
+      await pingHealth();
+    } catch (e) {
+      showFlash(String(e.message || e), "err", 0);
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function reloadAll() {
+    showFlash("Refreshing…", "", 0);
+    try {
+      await Promise.all([pingHealth(), loadStats(), loadLatest(), loadHistory(), loadActivity()]);
+      showFlash("Data refreshed.", "ok", 3200);
+    } catch (e) {
+      showFlash(String(e.message || e), "err", 0);
+      $("connStatus").textContent = "Connection issue";
+    }
+  }
+
+  function exportJson(payload) {
+    const p = payload || lastPayload;
+    if (!p) {
+      alert("No scan loaded yet.");
+      return;
+    }
+    const blob = new Blob([JSON.stringify(p, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "meridian-scan-" + (p.id || "latest") + ".json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function closeDrawer() {
+    $("drawerBackdrop").classList.remove("is-open");
+    $("drawerBackdrop").setAttribute("aria-hidden", "true");
+    drawerSnapshot = null;
+  }
+
+  async function openScanDrawer(scanId) {
+    try {
+      const r = await fetch("/api/scans/" + scanId);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "not found");
+      const scan = j.scan;
+      drawerSnapshot = scan;
+      $("drawerTitle").textContent = "Scan #" + scan.id;
+      const sigs = scan.signals || [];
+      const meta =
+        "<div class='meta'><strong>" +
+        escapeHtml(fmtTime(scan.created_at)) +
+        "</strong> · " +
+        escapeHtml(scan.provider || "") +
+        " · " +
+        escapeHtml(scan.htf || "") +
+        "/" +
+        escapeHtml(scan.ltf || "") +
+        " · " +
+        sigs.length +
+        " signals</div>";
+      const table =
+        "<div class='table-wrap' style='max-height:70vh'><table class='data'><thead><tr><th>Symbol</th><th>Name</th><th>Setup stage</th><th>UI</th><th>Grade</th><th>Score</th><th>RR</th></tr></thead><tbody>" +
+        sigs.map((s) => {
+          const p = s.payload || s;
+          const setup = p.setup || {};
+          const dag = String(p.dag_state || setup.state || "—");
+          const grade = String(p.classification || setup.classification || "—");
+          const rr = p.rr == null ? "—" : Number(p.rr).toFixed(2);
+          const symDraw = signalSymbol(s);
+          const nameDraw = escapeHtml(displayNameForSignal(s));
+          return (
+            "<tr><td><strong>" +
+            escapeHtml(symDraw) +
+            "</strong></td><td class='td-ticker-name'>" +
+            nameDraw +
+            "</td><td><span class='" +
+            dagPillClass(dag) +
+            "' title='" +
+            escapeHtml(dag) +
+            "'>" +
+            escapeHtml(humanize(dag)) +
+            "</span></td><td><span class='" +
+            uiPillClass(p.status) +
+            "' title='" +
+            escapeHtml(String(p.status || "")) +
+            "'>" +
+            escapeHtml(humanize(p.status || "")) +
+            "</span></td><td><span class='" +
+            gradePillClass(grade) +
+            "' title='" +
+            escapeHtml(grade) +
+            "'>" +
+            escapeHtml(humanize(grade)) +
+            "</span></td><td class='num'>" +
+            escapeHtml(String(p.score ?? "")) +
+            "</td><td class='num'>" +
+            escapeHtml(rr) +
+            "</td></tr>"
+          );
+        }).join("") +
+        "</tbody></table></div>";
+      $("drawerBody").innerHTML = meta + table;
+      $("drawerBackdrop").classList.add("is-open");
+      $("drawerBackdrop").setAttribute("aria-hidden", "false");
+      $("drawerClose").focus();
+    } catch (e) {
+      showFlash("Could not load scan: " + String(e && e.message ? e.message : e), "err", 4000);
+    }
+  }
+
+  let timer = null;
+  function armAuto() {
+    if (timer) clearInterval(timer);
+    const sec = Number($("refreshSec").value || 0);
+    if (sec > 0) timer = setInterval(reloadAll, sec * 1000);
+  }
+
+  document.querySelector("#signalTable thead").addEventListener("click", (ev) => {
+    const th = ev.target.closest("th[data-sort]");
+    if (!th) return;
+    const key = th.getAttribute("data-sort");
+    if (sortState.key === key) sortState.dir *= -1;
+    else {
+      sortState.key = key;
+      sortState.dir = 1;
+    }
+    renderSignalRows(currentSignals);
+  });
+
+  $("btnScan").addEventListener("click", runScan);
+  $("btnReload").addEventListener("click", reloadAll);
+  $("btnExport").addEventListener("click", () => exportJson(null));
+  $("refreshSec").addEventListener("change", armAuto);
+  $("filterSetupStage").addEventListener("change", applyFilters);
+  $("filterSym").addEventListener("input", () => {
+    if (filterDebounce) clearTimeout(filterDebounce);
+    filterDebounce = setTimeout(applyFilters, 140);
+  });
+  $("flashDismiss").addEventListener("click", hideFlash);
+  $("drawerClose").addEventListener("click", closeDrawer);
+  $("drawerExport").addEventListener("click", () => exportJson(drawerSnapshot));
+  $("drawerBackdrop").addEventListener("click", closeDrawer);
+
+  $("historyTable").addEventListener("click", (ev) => {
+    const tr = ev.target.closest("tr.history-row");
+    if (!tr) return;
+    const id = tr.getAttribute("data-scan-id");
+    if (id) openScanDrawer(id);
+  });
+  $("historyTable").addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter") return;
+    const tr = ev.target.closest("tr.history-row");
+    if (!tr) return;
+    const id = tr.getAttribute("data-scan-id");
+    if (id) openScanDrawer(id);
+  });
+
+  function isTypingContext(el) {
+    if (!el || !el.tagName) return false;
+    const t = el.tagName.toLowerCase();
+    if (t === "input" || t === "textarea" || t === "select" || t === "button") return true;
+    if (el.isContentEditable) return true;
+    return !!el.closest('[role="dialog"]');
+  }
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "/" && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      if (!isTypingContext(document.activeElement) && document.activeElement !== $("filterSym")) {
+        ev.preventDefault();
+        $("filterSym").focus();
+      }
+    }
+    if (ev.key === "Escape" && $("drawerBackdrop").classList.contains("is-open")) closeDrawer();
+  });
+
+
+  hideFlash();
+  reloadAll();
+  armAuto();
+  pingHealth();
+})();
+  </script>
+</body>
+</html>
