@@ -5,3 +5,5 @@ __pycache__/
 data/*.sqlite3
 data/*.sqlite3-*
 .vercel
+data/*.csv.gz
+data/hs_results.csv
