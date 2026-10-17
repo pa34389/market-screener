@@ -90,7 +90,7 @@ def load_csv(path: str | Path) -> pd.DataFrame:
     if tcol is None:
         raise ValueError(f"No time column in {path}; expected one of datetime/time/timestamp/date")
     t = df[tcol]
-    if np.issubdtype(t.dtype, np.number):
+    if pd.api.types.is_numeric_dtype(t):
         unit = "ms" if t.iloc[0] > 1e11 else "s"
         dt = pd.to_datetime(t, unit=unit, utc=True)
     else:
@@ -421,6 +421,12 @@ def report(results: pd.DataFrame, min_trades: int, top: int = 15) -> str:
     return "\n".join(lines)
 
 
+def trades_path(results_path: str | Path) -> Path:
+    """hs_results<tag>.csv -> hs_trades<tag>.csv.gz, so fee variants don't overwrite each other."""
+    p = Path(results_path)
+    return p.with_name(p.stem.replace("results", "trades", 1) + ".csv.gz")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     p = argparse.ArgumentParser(description="H&S pivot-block backtest + optimiser")
@@ -457,9 +463,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     results = evaluate(trades, split)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     results.to_csv(args.out, index=False)
-    trades.to_csv(Path(args.out).with_name("hs_trades.csv.gz"), index=False)
+    trades_out = trades_path(args.out)
+    trades.to_csv(trades_out, index=False)
     print(report(results, args.min_trades))
-    print(f"\nFull grid -> {args.out}; every candidate trade -> {Path(args.out).with_name('hs_trades.csv.gz')}")
+    print(f"\nFull grid -> {args.out}; every candidate trade -> {trades_out}")
     return 0
 
 
