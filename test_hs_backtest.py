@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from hs_backtest import Fees, GRID, evaluate, pivot_highs, resolve_exits, simulate, synthetic_ohlcv
+from hs_backtest import Fees, GRID, evaluate, load_csv, pivot_highs, resolve_exits, simulate, synthetic_ohlcv, trades_path
 
 # (open, high, low, close). Left shoulder idx 3 (zone 102-105, mid 103.5), neckline 98 (idx 5),
 # head 108 (idx 7), MSB close 97.5 (idx 9), right shoulder tags mid at idx 11, closes back below
@@ -126,6 +128,25 @@ class TestExits(unittest.TestCase):
                      fees=Fees(maker=0.001, taker=0.001))
         r = t.set_index("entry").loc["mid"]
         self.assertAlmostEqual(r.r_net, 3.0 - (0.001 * 103.5 + 0.001 * 90.0) / 4.5)
+
+
+class TestOutputs(unittest.TestCase):
+    def test_trades_path_follows_results_tag(self) -> None:
+        self.assertEqual(trades_path("data/hs_results.csv").name, "hs_trades.csv.gz")
+        self.assertEqual(trades_path("data/hs_results_spot.csv").name, "hs_trades_spot.csv.gz")
+
+
+    def test_load_csv_round_trips_string_and_epoch_times(self) -> None:
+        df = _frame(BEAR_HS)
+        with tempfile.TemporaryDirectory() as d:
+            iso = Path(d) / "iso.csv.gz"
+            df.to_csv(iso, index=False)  # datetime written as text, like the download cache
+            epoch = Path(d) / "tv.csv"
+            df.assign(time=[int(t.timestamp()) for t in df.datetime]).drop(columns="datetime").to_csv(epoch, index=False)
+            for path in (iso, epoch):
+                got = load_csv(path)
+                self.assertEqual(list(got.datetime), list(df.datetime))
+                self.assertEqual(list(got.close), list(df.close))
 
 
 class TestSmoke(unittest.TestCase):
