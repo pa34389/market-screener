@@ -12,7 +12,7 @@ import pandas as pd
 
 import hs_backtest
 from hs_backtest import (Fees, GRID, atr_wilder, detect_setups, download_bybit, evaluate, find_entry, killzone_of,
-                         load_csv, pivot_block, pivot_highs, resolve_exits, simulate, synthetic_ohlcv, trades_path)
+                         load_csv, pivot_block, resample_ohlcv, pivot_highs, resolve_exits, simulate, synthetic_ohlcv, trades_path)
 
 REFERENCE_CSV = Path(__file__).resolve().parent / "testdata" / "bybit_btcusdt_5m_2026-10-15.csv"
 
@@ -316,6 +316,17 @@ class TestBybitDownload(unittest.TestCase):
         self.assertEqual(len(df), 10)
 
 
+class TestResample(unittest.TestCase):
+    def test_15min_bars_and_gaps(self) -> None:
+        df = _frame(BEAR_HS[:6])  # 00:00 .. 00:25 -> two 15m bars
+        df = pd.concat([df, _frame(BEAR_HS[6:9]).assign(
+            datetime=pd.date_range("2024-01-01 01:00", periods=3, freq="5min", tz="UTC"))], ignore_index=True)
+        r = resample_ohlcv(df, "15min")
+        self.assertEqual([t.strftime("%H:%M") for t in r.datetime], ["00:00", "00:15", "01:00"])  # 00:30/00:45 gap dropped
+        self.assertEqual(tuple(r.iloc[0][["open", "high", "low", "close"]]), (100, 103, 99, 102.5))  # bars 00:00-00:10
+        self.assertEqual(tuple(r.iloc[2][["open", "high", "low", "close"]]), (99, 108, 98.5, 103.5))
+
+
 class TestPatternAnalysis(unittest.TestCase):
     def test_mfe_stops_counting_at_the_stop_bar(self) -> None:
         from hs_patterns import mfe_before_stop
@@ -325,6 +336,35 @@ class TestPatternAnalysis(unittest.TestCase):
         self.assertAlmostEqual(mfe_before_stop(h, l, 1, 100.0, 102.0, 100), 5.0)  # only bars 1-2 count
         self.assertAlmostEqual(mfe_before_stop(h, l, 3, 100.0, 102.0, 100), 0.0)  # stopped on the first bar
         self.assertAlmostEqual(mfe_before_stop(h, l, 4, 100.0, 102.0, 100), 20.0)  # never stopped
+
+
+class TestTradeManagement(unittest.TestCase):
+    # Short from 100, stop 101 (1R = 1). Each bar is (high, low).
+    @staticmethod
+    def _walk(bars, rule):
+        from hs_manage import manage
+
+        h = np.array([b[0] for b in bars], dtype=float)
+        l = np.array([b[1] for b in bars], dtype=float)
+        c = (h + l) / 2
+        return manage(h, l, c, 0, 100.0, 101.0, rule, 1000)
+
+    def test_fixed_target_and_same_bar_stop_first(self) -> None:
+        self.assertEqual(self._walk([(100.5, 97), (99, 95.5)], "fixed4R"), [(1.0, 96.0, "target")])
+        self.assertEqual(self._walk([(101.2, 90)], "fixed4R"), [(1.0, 101.0, "stop")])
+
+    def test_break_even_applies_from_next_bar(self) -> None:
+        self.assertEqual(self._walk([(100.5, 98.8), (100.2, 99.5)], "be1R_4R"), [(1.0, 100.0, "stop")])
+        # The bar that reaches +1R and then trades back to entry does not stop out at break-even.
+        self.assertEqual(self._walk([(100.5, 98.8), (99.5, 95.9)], "be1R_4R"), [(1.0, 96.0, "target")])
+
+    def test_partial_then_break_even(self) -> None:
+        legs = self._walk([(100.5, 97.9), (100.1, 99)], "half2R_4R")
+        self.assertEqual(legs, [(0.5, 98.0, "target"), (0.5, 100.0, "stop")])
+
+    def test_trailing_stop(self) -> None:
+        # Best 97.5 (+2.5R) -> trail at 99.5; next bar's high 99.6 exits there.
+        self.assertEqual(self._walk([(100.5, 97.5), (99.6, 98)], "trail2R"), [(1.0, 99.5, "stop")])
 
 
 class TestSmoke(unittest.TestCase):

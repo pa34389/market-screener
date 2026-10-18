@@ -261,6 +261,15 @@ def download_bybit(
     return _download_cached(cache_path(symbol, interval, "bybit"), start, end, fetch_page)
 
 
+def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Aggregate candles to a higher timeframe (e.g. "15min", "1h"). Bins are labelled by their open
+    time; bins with no source candles (exchange gaps) are dropped rather than filled."""
+    g = df.set_index("datetime").resample(timeframe, label="left", closed="left")
+    out = pd.DataFrame({"open": g.open.first(), "high": g.high.max(), "low": g.low.min(),
+                        "close": g.close.last(), "volume": g.volume.sum()})
+    return out.dropna(subset=["open"]).reset_index()
+
+
 def synthetic_ohlcv(n: int = 60_000, seed: int = 1) -> pd.DataFrame:
     """Random-walk candles for smoke runs only — results on this mean nothing."""
     rng = np.random.default_rng(seed)
@@ -583,6 +592,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--interval", default="5m")
     p.add_argument("--start", default="2022-01-01")
     p.add_argument("--end", default=None)
+    p.add_argument("--timeframe", default=None, help='resample the loaded candles, e.g. "15min" or "1h"')
     p.add_argument("--is-frac", type=float, default=0.7, help="In-sample fraction (rest is out-of-sample)")
     p.add_argument("--min-trades", type=int, default=50)
     p.add_argument("--maker", type=float, default=Fees.maker)
@@ -598,6 +608,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         df = load_csv(args.csv)
     else:
         df = synthetic_ohlcv()
+    if args.timeframe:
+        df = resample_ohlcv(df, args.timeframe)
     log.info("bars: %d  (%s -> %s)", len(df), df.datetime.iloc[0], df.datetime.iloc[-1])
 
     fees = Fees(args.maker, args.taker, args.slippage)

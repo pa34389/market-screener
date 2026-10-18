@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from hs_backtest import DATA_DIR, GRID, cache_path, load_csv, select_trades, stats
+from hs_backtest import DATA_DIR, GRID, cache_path, load_csv, resample_ohlcv, select_trades, stats
 
 ORDINAL = ("pivot_len", "stop_buffer_atr", "expiry", "min_risk_pct", "target_r")
 CATEGORICAL = ("entry", "direction", "killzone")
@@ -186,6 +186,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--interval", default="5m")
     p.add_argument("--start", default="2022-01-01", help="must match the hs_backtest run")
     p.add_argument("--is-frac", type=float, default=0.7, help="must match the hs_backtest run")
+    p.add_argument("--end", default=None, help="must match the hs_backtest run")
+    p.add_argument("--timeframe", default=None, help="must match the hs_backtest run")
     args = p.parse_args(argv)
     pd.set_option("display.width", 220)
     ff = lambda x: f"{x:.3f}"  # noqa: E731
@@ -196,6 +198,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Same split as hs_backtest.main: first is_frac of the bars it was run on.
     bars = load_csv(cache_path(args.symbol, args.interval, args.exchange))
     bars = bars[bars.datetime >= pd.Timestamp(args.start, tz="UTC")].reset_index(drop=True)
+    if args.end:
+        bars = bars[bars.datetime <= pd.Timestamp(args.end, tz="UTC")].reset_index(drop=True)
+    if args.timeframe:
+        bars = resample_ohlcv(bars, args.timeframe)
     split_idx = int(len(bars) * args.is_frac)
     split_time = bars.datetime.iloc[split_idx]
 
@@ -251,7 +257,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         eq = DATA_DIR / f"hs_equity_top3{args.tag}.png"
         hm = DATA_DIR / f"hs_heatmap_target_expiry{args.tag}.png"
         fee = "spot 0.1%/0.1%" if args.tag.endswith("_spot") else "perp 0.02%/0.055%"
-        plot_equity(picks, trades, split_time, eq, f"{pick_label}, {args.exchange.title()} BTCUSDT spot 5m, net of {fee} fees")
+        plot_equity(picks, trades, split_time, eq, f"{pick_label}, {args.exchange.title()} BTCUSDT spot {args.timeframe or '5m'}, net of {fee} fees")
         plot_heatmap(res, picks[0], hm, f"target_r × expiry, other params fixed at: {fmt_cfg(picks[0])} "
                                          f"({fee} fees)", args.min_trades)
         print(f"Saved {eq}\nSaved {hm}")
