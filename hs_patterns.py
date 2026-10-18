@@ -25,7 +25,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
-from hs_backtest import atr_wilder, cache_path, detect_setups, find_entry, load_csv
+from hs_backtest import atr_wilder, cache_path, detect_setups, find_entry, load_csv, resample_ohlcv
 
 FEATURES = {
     "risk_pct": "stop distance, % of price",
@@ -56,11 +56,13 @@ def mfe_before_stop(h: np.ndarray, l: np.ndarray, start: int, entry: float, stop
     return max(0.0, entry - float(l[start:start + stop_at].min()))
 
 
-def build(df: pd.DataFrame, pivot_len: int, entry_mode: str, buf: float, expiry: int, horizon: int) -> pd.DataFrame:
+def build(df: pd.DataFrame, pivot_len: int, entry_mode: str, buf: float, expiry: int, horizon: int,
+          bars_per_hour: int = 12) -> pd.DataFrame:
     o0, h0, l0, c0 = (df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
     atr = atr_wilder(h0, l0, c0)
-    ema_1h = pd.Series(c0).ewm(span=200 * 12, adjust=False).mean().to_numpy()
-    ema_1d = pd.Series(c0).ewm(span=50 * 288, adjust=False).mean().to_numpy()
+    ema_1h = pd.Series(c0).ewm(span=200 * bars_per_hour, adjust=False).mean().to_numpy()
+    ema_1d = pd.Series(c0).ewm(span=50 * 24 * bars_per_hour, adjust=False).mean().to_numpy()
+    day = 24 * bars_per_hour
     ny = df.datetime.dt.tz_convert("America/New_York")
     rows = []
     for direction, (o, h, l, c, e1, e2) in {
@@ -96,7 +98,7 @@ def build(df: pd.DataFrame, pivot_len: int, entry_mode: str, buf: float, expiry:
                 # In short space "with trend" = price below the EMA; the mirrored long space flips it for free.
                 "trend_1h": (e1[p] - c[p]) / px * 100,
                 "trend_1d": (e2[p] - c[p]) / px * 100,
-                "move_24h": (c[max(0, p - 288)] - c[p]) / px * 100 if p >= 288 else np.nan,
+                "move_24h": (c[p - day] - c[p]) / px * 100 if p >= day else np.nan,
                 "ny_hour": ny.iloc[e_idx].hour,
                 "weekday": ny.iloc[e_idx].day_name()[:3],
             })
@@ -134,15 +136,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--entry", choices=("close", "mid"), default="close")
     p.add_argument("--stop-buffer-atr", type=float, default=0.1)
     p.add_argument("--expiry", type=int, default=96)
-    p.add_argument("--horizon", type=int, default=2016, help="max bars to follow a trade (2016 = 1 week)")
-    p.add_argument("--fee-r", action="store_true", help="also show the per-trade fee drag in R (perp fees)")
+    p.add_argument("--horizon-hours", type=int, default=168, help="max time to follow a trade (default 1 week)")
+    p.add_argument("--timeframe", default=None, help='resample, e.g. "15min" or "1h" (default: 5m as cached)')
     args = p.parse_args(argv)
     pd.set_option("display.width", 220)
 
     df = load_csv(cache_path("BTCUSDT", "5m", args.exchange))
     df = df[df.datetime >= pd.Timestamp(args.start, tz="UTC")].reset_index(drop=True)
+    bph = 12
+    if args.timeframe:
+        df = resample_ohlcv(df, args.timeframe)
+        bph = int(pd.Timedelta("1h") / pd.Timedelta(args.timeframe))
     split = int(len(df) * args.is_frac)
-    t = build(df, args.pivot_len, args.entry, args.stop_buffer_atr, args.expiry, args.horizon)
+    t = build(df, args.pivot_len, args.entry, args.stop_buffer_atr, args.expiry, args.horizon_hours * bph, bph)
     is_mask = (t.entry_idx < split).to_numpy()
     print(f"Setups: {len(t)} (IS {is_mask.sum()}, OOS {(~is_mask).sum()}), split at {df.datetime.iloc[split]}")
     for tag, m in (("IS", is_mask), ("OOS", ~is_mask)):
