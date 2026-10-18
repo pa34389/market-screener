@@ -239,6 +239,7 @@ def spearman(t: pd.DataFrame, col: str, mask: np.ndarray) -> float:
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Winners vs losers feature analysis for the H&S system")
     p.add_argument("--exchange", choices=("bybit", "binance"), default="bybit")
+    p.add_argument("--symbol", default="BTCUSDT")
     p.add_argument("--start", default="2022-01-01")
     p.add_argument("--is-frac", type=float, default=0.7)
     p.add_argument("--pivot-len", type=int, default=5)
@@ -252,7 +253,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = p.parse_args(argv)
     pd.set_option("display.width", 220)
 
-    df = load_csv(cache_path("BTCUSDT", "5m", args.exchange))
+    df = load_csv(cache_path(args.symbol, "5m", args.exchange))
     df = df[df.datetime >= pd.Timestamp(args.start, tz="UTC")].reset_index(drop=True)
     bph = 12
     if args.timeframe:
