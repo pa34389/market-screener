@@ -328,6 +328,22 @@ class TestResample(unittest.TestCase):
 
 
 class TestPatternAnalysis(unittest.TestCase):
+    def test_session_ranges_exist_only_once_complete(self) -> None:
+        from hs_patterns import session_context
+
+        # Hourly bars from 2024-01-15 18:00 to 2024-01-16 10:00 New York (EST = UTC-5); high = 100 + hour index.
+        t = pd.date_range("2024-01-15 23:00", "2024-01-16 15:00", freq="1h", tz="UTC")
+        df = pd.DataFrame({"datetime": t, "open": 100.0, "high": 100.0 + np.arange(len(t)),
+                           "low": 99.0 - np.arange(len(t)), "close": 100.0, "volume": 1.0})
+        ctx = session_context(df, bars_per_hour=1)
+        ny = t.tz_convert("America/New_York")
+        at = lambda hh: int(np.flatnonzero((ny.day == 16) & (ny.hour == hh))[0])  # noqa: E731
+        # Asia range for the 16th = 15th 20:00-23:00 bars (indices 2..5): high 105, low 94.
+        self.assertEqual((ctx["asia_hi"][at(1)], ctx["asia_lo"][at(1)]), (105.0, 94.0))
+        # London range (02:00-04:00 = indices 8..10) is unknown before 05:00, then high 110.
+        self.assertTrue(np.isnan(ctx["lon_hi"][at(4)]))
+        self.assertEqual(ctx["lon_hi"][at(5)], 110.0)
+
     def test_mfe_stops_counting_at_the_stop_bar(self) -> None:
         from hs_patterns import mfe_before_stop
 
