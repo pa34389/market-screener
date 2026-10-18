@@ -250,6 +250,20 @@ class TestReferenceTrade(unittest.TestCase):
         e_time = self.df.datetime.iloc[self.at("06:35")]
         self.assertEqual(killzone_of(pd.DatetimeIndex([e_time]))[0], "")
 
+    def test_discretionary_features_on_reference_trade(self) -> None:
+        from hs_discretion import add_features
+        from hs_patterns import build
+
+        t = build(self.df, 5, "close", 0.1, 96, 2016, 12)
+        t = add_features(t, self.df, 12)
+        r = t[(t.direction == "short") & (t.entry_idx == self.at("06:35"))].iloc[0]
+        # Right shoulder peaked at 81,983.9 (06:20), above the 81,860.1-81,973.0 zone top.
+        self.assertAlmostEqual(r.rs_depth, (81983.9 - 81860.1) / (81973.0 - 81860.1), places=6)
+        self.assertAlmostEqual(r.rs_vs_ls_atr, (81983.9 - 81989.7) / r.atr_msb, places=6)
+        # MSB candle 03:30: high 81,952.7, low 81,794.1, close 81,825.2.
+        self.assertAlmostEqual(r.msb_close_loc, (81952.7 - 81825.2) / (81952.7 - 81794.1), places=6)
+        self.assertEqual(r.lon_x_asia + r.ny_x_lon, 0.0)  # 16:35 New York: neither session sweep
+
     def test_no_lookahead(self) -> None:
         full = self.setup_for_head(3)
         cut = self.setup_for_head(3, n_bars=full.msb_idx + 1)  # data ends at the MSB close
