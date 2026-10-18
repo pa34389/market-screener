@@ -316,6 +316,17 @@ class TestBybitDownload(unittest.TestCase):
         self.assertEqual(len(df), 10)
 
 
+class TestPatternAnalysis(unittest.TestCase):
+    def test_mfe_stops_counting_at_the_stop_bar(self) -> None:
+        from hs_patterns import mfe_before_stop
+
+        h = np.array([100.0, 100.5, 99.0, 103.0, 99.0])
+        l = np.array([99.0, 97.0, 95.0, 90.0, 80.0])  # bar 3 hits the stop (103) and also trades to 90
+        self.assertAlmostEqual(mfe_before_stop(h, l, 1, 100.0, 102.0, 100), 5.0)  # only bars 1-2 count
+        self.assertAlmostEqual(mfe_before_stop(h, l, 3, 100.0, 102.0, 100), 0.0)  # stopped on the first bar
+        self.assertAlmostEqual(mfe_before_stop(h, l, 4, 100.0, 102.0, 100), 20.0)  # never stopped
+
+
 class TestSmoke(unittest.TestCase):
     def test_synthetic_runs(self) -> None:
         t = simulate(synthetic_ohlcv(5_000), pivot_lens=(5,), stop_buffers=(0.1,))
