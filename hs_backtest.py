@@ -62,6 +62,25 @@ GRID: Dict[str, Tuple] = {
     "min_risk_pct": (0.0, 0.15, 0.3),
     "direction": ("both", "short", "long"),
     "target_r": TARGETS_R,
+    "killzone": ("any", "asia", "london", "ny_am", "ny_pm", "london_ny", "all"),
+}
+
+# ICT killzones in New York local time (DST-aware), [start, end). Applied to the entry candle's open time.
+KILLZONES: Dict[str, Tuple[str, str]] = {
+    "asia": ("20:00", "24:00"),
+    "london": ("02:00", "05:00"),
+    "ny_am": ("07:00", "10:00"),
+    "london_close": ("10:00", "12:00"),
+    "ny_pm": ("13:30", "16:00"),
+}
+KILLZONE_SETS: Dict[str, Optional[frozenset]] = {
+    "any": None,
+    "asia": frozenset({"asia"}),
+    "london": frozenset({"london"}),
+    "ny_am": frozenset({"ny_am"}),
+    "ny_pm": frozenset({"ny_pm"}),
+    "london_ny": frozenset({"london", "ny_am"}),
+    "all": frozenset(KILLZONES),
 }
 
 
@@ -443,7 +462,21 @@ def simulate(
     if len(trades):
         trades["entry_time"] = df["datetime"].to_numpy()[trades["entry_idx"].to_numpy()]
         trades["exit_time"] = df["datetime"].to_numpy()[trades["exit_idx"].to_numpy()]
+        trades["killzone"] = killzone_of(pd.DatetimeIndex(trades["entry_time"]))
     return trades
+
+
+def killzone_of(times: pd.DatetimeIndex) -> np.ndarray:
+    """Killzone name for each UTC timestamp (New York local time), or "" outside all killzones."""
+    ny = times.tz_localize("UTC") if times.tz is None else times
+    ny = ny.tz_convert("America/New_York")
+    minute = ny.hour * 60 + ny.minute
+    out = np.full(len(times), "", dtype=object)
+    for name, (a, b) in KILLZONES.items():
+        lo = int(a[:2]) * 60 + int(a[3:])
+        hi = int(b[:2]) * 60 + int(b[3:])
+        out[(minute >= lo) & (minute < hi)] = name
+    return out
 
 
 # --------------------------------------------------------------------------- evaluation
@@ -483,6 +516,9 @@ def select_trades(trades: pd.DataFrame, cfg: Dict) -> pd.DataFrame:
           & (t.bars_to_entry <= cfg["expiry"]) & (t.risk_pct >= cfg["min_risk_pct"])]
     if cfg["direction"] != "both":
         t = t[t.direction == cfg["direction"]]
+    zones = KILLZONE_SETS[cfg.get("killzone", "any")]
+    if zones is not None:
+        t = t[t.killzone.isin(zones)]
     t = t.sort_values(["entry_idx", "msb_idx"])
     return t[_non_overlapping(t.entry_idx.to_numpy(), t.exit_idx.to_numpy())]
 
@@ -516,14 +552,14 @@ def report(results: pd.DataFrame, min_trades: int, top: int = 15) -> str:
     if ok.empty:
         return f"No config reached {min_trades} in-sample trades."
     best = ok.sort_values("is_total_r", ascending=False).head(top)
-    cols = ["pivot_len", "entry", "stop_buffer_atr", "expiry", "min_risk_pct", "direction", "target_r",
+    cols = ["pivot_len", "entry", "stop_buffer_atr", "expiry", "min_risk_pct", "direction", "target_r", "killzone",
             "is_trades", "is_win_rate", "is_exp_r", "is_total_r", "is_max_dd_r",
             "oos_trades", "oos_win_rate", "oos_exp_r", "oos_total_r", "oos_max_dd_r"]
     lines.append(f"Top {top} configs by in-sample total R (net of fees, >= {min_trades} IS trades):")
     lines.append(best[cols].to_string(index=False, float_format=lambda x: f"{x:.2f}"))
     lines.append("")
     lines.append("Parameter sensitivity — median full-sample expectancy (R/trade, net) across all other settings:")
-    for p in ("target_r", "entry", "stop_buffer_atr", "pivot_len", "expiry", "min_risk_pct", "direction"):
+    for p in ("target_r", "entry", "stop_buffer_atr", "pivot_len", "expiry", "min_risk_pct", "direction", "killzone"):
         m = results.groupby(p)[["all_exp_r", "all_trades"]].median()
         lines.append(f"  {p}: " + ", ".join(f"{k}={v.all_exp_r:+.3f} (n~{v.all_trades:.0f})" for k, v in m.iterrows()))
     return "\n".join(lines)
