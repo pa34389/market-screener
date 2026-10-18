@@ -2,25 +2,33 @@
 Head & shoulders "pivot block" backtester + parameter optimiser (BTC, 5m by default).
 
 Bearish rules (bullish is the exact mirror):
-    1. Left shoulder (LS): a swing-high pivot. Its candle is the *pivot block*;
-       zone = [LS candle low, LS candle high], mid = 50% of that candle.
+    1. Left shoulder (LS): a swing high — higher than the ``pivot_len`` candles
+       before it, confirmed by the next candle making a lower high. The *pivot
+       block* is the candle that closes to create that high: the last bullish
+       candle at or before the swing-high candle. Zone = [pivot block low, high],
+       mid = 50% of that candle.
     2. Head: a higher high after the LS (highest high since the LS).
     3. Neckline: the lowest low between the LS and the head (the head's low).
     4. MSB: first candle that *closes* below the neckline after the head.
+       One setup per head: only the LS closest to the head is used.
     5. Wait for the right shoulder to come back into the pivot block:
          - entry "mid":   resting sell limit at the zone mid
-         - entry "close": price trades into the zone, then a candle closes back
-                          below the zone low -> short at that close
+         - entry "close": price trades up to at least the zone mid, then a candle
+                          closes back below the zone low -> short at that close
        Setup cancels if price trades above the stop before entry, or after
        ``expiry`` bars.
     6. Stop: head high + ``stop_buffer_atr`` x ATR(14) at the MSB candle.
     7. Target: fixed R multiple (3..7R tested).
 
+Reference trade (test_hs_backtest.TestReferenceTrade): Bybit BTCUSDT spot 5m,
+15 Oct 2026 UTC+10 — pivot block 02:40, head 03:05, MSB 03:30, close entry 06:35.
+
 Fills are conservative: a candle that touches both stop and target counts as a
 loss, and a mid fill whose candle also reaches the stop is a loss.
 
 Usage:
-    python hs_backtest.py --download --start 2022-01-01      # Binance BTCUSDT 5m, cached in data/
+    python hs_backtest.py --download --start 2022-01-01      # Bybit spot BTCUSDT 5m, cached in data/
+    python hs_backtest.py --download --exchange binance       # Binance spot instead
     python hs_backtest.py --csv my_tradingview_export.csv     # or any OHLC CSV
     python hs_backtest.py --synthetic                         # offline smoke run (fake data)
     python -m unittest test_hs_backtest
@@ -69,7 +77,8 @@ class Fees:
 @dataclass(frozen=True)
 class Setup:
     direction: str  # "short" | "long"
-    ls_idx: int
+    ls_idx: int  # swing-high candle
+    pb_idx: int  # pivot block candle (zone)
     head_idx: int
     msb_idx: int
     zone_low: float  # in the (possibly mirrored) price space
@@ -103,6 +112,40 @@ def load_csv(path: str | Path) -> pd.DataFrame:
     return out.sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
 
 
+def cache_path(symbol: str, interval: str, exchange: str) -> Path:
+    """Binance keeps the original cache name; other exchanges get a suffix."""
+    suffix = "" if exchange == "binance" else f"_{exchange}"
+    return DATA_DIR / f"{symbol}_{interval}{suffix}.csv.gz"
+
+
+def _download_cached(cache: Path, start: str, end: Optional[str], fetch_page) -> pd.DataFrame:
+    """Cache-aware forward pagination. ``fetch_page(cursor_ms, end_ms)`` returns an ascending
+    OHLCV frame starting at ``cursor_ms`` (empty when there is nothing more)."""
+    start_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
+    end_ms = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000) if end else int(time.time() * 1000)
+    frames: List[pd.DataFrame] = []
+    if cache.exists():
+        cached = load_csv(cache)
+        frames.append(cached)
+        if len(cached) and cached["datetime"].iloc[0] <= pd.Timestamp(start, tz="UTC"):
+            start_ms = int(cached["datetime"].iloc[-1].timestamp() * 1000) + 1
+    cursor = start_ms
+    while cursor < end_ms:
+        page = fetch_page(cursor, end_ms)
+        if page.empty:
+            break
+        frames.append(page)
+        cursor = int(page["datetime"].iloc[-1].timestamp() * 1000) + 1
+        log.info("downloaded %s .. %s", page["datetime"].iloc[0], page["datetime"].iloc[-1])
+        time.sleep(0.05)
+    df = pd.concat(frames).sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(cache, index=False)
+    lo = pd.Timestamp(start, tz="UTC")
+    hi = pd.Timestamp(end_ms, unit="ms", tz="UTC")
+    return df[(df["datetime"] >= lo) & (df["datetime"] <= hi)].reset_index(drop=True)
+
+
 def download_binance(
     symbol: str = "BTCUSDT",
     interval: str = "5m",
@@ -115,18 +158,9 @@ def download_binance(
 
     from setup_scout import normalise_binance_klines
 
-    cache = DATA_DIR / f"{symbol}_{interval}.csv.gz"
-    start_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
-    end_ms = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000) if end else int(time.time() * 1000)
-    frames: List[pd.DataFrame] = []
-    if cache.exists():
-        cached = load_csv(cache)
-        frames.append(cached)
-        if len(cached) and cached["datetime"].iloc[0] <= pd.Timestamp(start, tz="UTC"):
-            start_ms = int(cached["datetime"].iloc[-1].timestamp() * 1000) + 1
     session = requests.Session()
-    cursor = start_ms
-    while cursor < end_ms:
+
+    def fetch_page(cursor: int, end_ms: int) -> pd.DataFrame:
         r = session.get(
             f"{base_url}/api/v3/klines",
             params={"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": end_ms, "limit": 1000},
@@ -134,18 +168,78 @@ def download_binance(
         )
         r.raise_for_status()
         rows = r.json()
-        if not rows:
-            break
-        frames.append(normalise_binance_klines(rows))
-        cursor = int(rows[-1][0]) + 1
-        log.info("downloaded %s .. %s", frames[-1]["datetime"].iloc[0], frames[-1]["datetime"].iloc[-1])
-        time.sleep(0.05)
-    df = pd.concat(frames).sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_csv(cache, index=False)
-    lo = pd.Timestamp(start, tz="UTC")
-    hi = pd.Timestamp(end_ms, unit="ms", tz="UTC")
-    return df[(df["datetime"] >= lo) & (df["datetime"] <= hi)].reset_index(drop=True)
+        return normalise_binance_klines(rows) if rows else pd.DataFrame()
+
+    return _download_cached(cache_path(symbol, interval, "binance"), start, end, fetch_page)
+
+
+def bybit_page(rows: Sequence[Sequence]) -> pd.DataFrame:
+    """Bybit v5 kline rows (newest first: [start_ms, open, high, low, close, volume, turnover]) -> ascending OHLCV."""
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame([r[:6] for r in rows], columns=["ts", "open", "high", "low", "close", "volume"])
+    df["datetime"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms", utc=True)
+    for c in ("open", "high", "low", "close", "volume"):
+        df[c] = pd.to_numeric(df[c], errors="raise")
+    return df[["datetime", "open", "high", "low", "close", "volume"]].sort_values("datetime").reset_index(drop=True)
+
+
+def download_bybit(
+    symbol: str = "BTCUSDT",
+    interval: str = "5m",
+    start: str = "2022-01-01",
+    end: Optional[str] = None,
+    category: str = "spot",
+    base_url: str = "https://api.bybit.com",
+    session=None,
+    retries: int = 5,
+    retry_wait: float = 1.0,
+) -> pd.DataFrame:
+    """Paginated Bybit v5 klines (spot by default), cached to data/<symbol>_<interval>_bybit.csv.gz."""
+    if session is None:
+        import requests
+
+        session = requests.Session()
+    minutes = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+    bybit_interval = "D" if interval == "1d" else str(minutes[interval])
+    limit = 1000
+    window_ms = (limit - 1) * minutes[interval] * 60_000
+
+    def fetch_window(cursor: int, end_ms: int) -> pd.DataFrame:
+        # Bybit returns the *newest* ``limit`` bars in [start, end], so keep each window to <= limit bars.
+        params = {"category": category, "symbol": symbol, "interval": bybit_interval,
+                  "start": cursor, "end": min(end_ms, cursor + window_ms), "limit": limit}
+        for attempt in range(retries):
+            try:
+                r = session.get(f"{base_url}/v5/market/kline", params=params, timeout=20)
+                r.raise_for_status()
+                body = r.json()
+                if body.get("retCode") != 0:
+                    raise RuntimeError(f"Bybit error {body.get('retCode')}: {body.get('retMsg')}")
+                return bybit_page(body["result"]["list"])
+            except Exception as exc:  # transient 10016 "internal error", timeouts, 5xx
+                if attempt == retries - 1:
+                    raise
+                log.warning("bybit page %s failed (%s), retrying", cursor, exc)
+                time.sleep(retry_wait * 2**attempt)
+
+    def fetch_page(cursor: int, end_ms: int) -> pd.DataFrame:
+        # Inside a gap in Bybit's history (e.g. 2022-04-11 13:10 -> 2022-04-15 17:15 UTC on BTCUSDT spot)
+        # the API ignores ``start`` and returns earlier bars: drop them and step over the empty window.
+        while cursor <= end_ms:
+            hi = min(end_ms, cursor + window_ms)
+            page = fetch_window(cursor, end_ms)
+            if not page.empty:
+                ts = page["datetime"].map(lambda t: int(t.timestamp() * 1000))
+                page = page[(ts >= cursor) & (ts <= hi)].reset_index(drop=True)
+            if not page.empty:
+                return page
+            log.warning("no bybit bars in %s .. %s, skipping gap",
+                        pd.Timestamp(cursor, unit="ms", tz="UTC"), pd.Timestamp(hi, unit="ms", tz="UTC"))
+            cursor = hi + 1
+        return pd.DataFrame()
+
+    return _download_cached(cache_path(symbol, interval, "bybit"), start, end, fetch_page)
 
 
 def synthetic_ohlcv(n: int = 60_000, seed: int = 1) -> pd.DataFrame:
@@ -171,15 +265,25 @@ def atr_wilder(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
 
 
 def pivot_highs(high: np.ndarray, n: int) -> np.ndarray:
-    """Index of bars whose high is strictly above the n bars before and >= the n bars after."""
+    """Swing highs: high strictly above the n bars before, and >= the next bar (confirmed one bar later)."""
     s = pd.Series(high)
     left = s.shift(1).rolling(n).max()
-    right = s[::-1].shift(1).rolling(n).max()[::-1]
+    right = s.shift(-1)
     mask = (s > left) & (s >= right)
     return np.flatnonzero(mask.to_numpy())
 
 
+def pivot_block(open_: np.ndarray, close: np.ndarray, swing_idx: int, lookback: int) -> int:
+    """The candle that closes to create the swing high: the last bullish candle at or before it
+    (searching back at most ``lookback`` bars). Falls back to the swing-high candle itself."""
+    for j in range(swing_idx, max(-1, swing_idx - lookback - 1), -1):
+        if close[j] > open_[j]:
+            return j
+    return swing_idx
+
+
 def detect_setups(
+    open_: np.ndarray,
     high: np.ndarray,
     low: np.ndarray,
     close: np.ndarray,
@@ -190,13 +294,16 @@ def detect_setups(
 ) -> List[Setup]:
     """Bearish H&S setups in the given price space (pass mirrored arrays for longs).
 
-    Only information available at the MSB close is used: the LS pivot is confirmed
-    (head is after the pivot's right-hand bars by construction), the head is the
-    highest high since the LS, and the MSB is the first close below the neckline.
+    Only information available at the MSB close is used: the LS swing is confirmed
+    by the next bar (the head is a later, higher bar), the head is the highest high
+    since the LS, and the MSB is the first close below the neckline. One setup per
+    head: the LS closest to the head; if that LS's pattern is invalid there is none.
     """
     n = len(high)
-    by_msb: Dict[Tuple[int, int], Setup] = {}
+    by_head: Dict[int, Tuple[int, Optional[Setup]]] = {}
     for i in pivot_highs(high, pivot_len):
+        pb = pivot_block(open_, close, i, pivot_len)
+        zone_low, zone_high = low[pb], high[pb]
         head_idx = -1
         head = high[i]
         neckline = np.inf
@@ -205,15 +312,15 @@ def detect_setups(
             if high[k] > head:
                 head, head_idx, neckline = high[k], k, run_min
             elif head_idx > 0 and close[k] < neckline:
-                if neckline < low[i]:
-                    # Keep the LS closest to the head (most recent lower pivot high).
-                    key = (head_idx, k)
-                    prev = by_msb.get(key)
-                    if prev is None or prev.ls_idx < i:
-                        by_msb[key] = Setup(direction, i, head_idx, k, low[i], high[i], head, neckline, atr[k])
+                setup = None
+                if neckline < zone_low:
+                    setup = Setup(direction, i, pb, head_idx, k, zone_low, zone_high, head, neckline, atr[k])
+                prev = by_head.get(head_idx)
+                if prev is None or prev[0] < i:
+                    by_head[head_idx] = (i, setup)
                 break
             run_min = min(run_min, low[k])
-    return sorted(by_msb.values(), key=lambda s: s.msb_idx)
+    return sorted((s for _, s in by_head.values() if s is not None), key=lambda s: s.msb_idx)
 
 
 # --------------------------------------------------------------------------- simulation
@@ -234,15 +341,16 @@ def find_entry(
     a = s.msb_idx + 1
     b = min(len(high), a + max_expiry)
     h = high[a:b]
+    mid = (s.zone_low + s.zone_high) / 2
     if mode == "mid":
-        mid = (s.zone_low + s.zone_high) / 2
         j = _first_true(h >= mid)
         if j < 0:
             return -1, 0.0, False
         return a + j, mid, bool(h[j] >= stop)
     if mode == "close":
-        touched = np.maximum.accumulate(h >= s.zone_low)
-        cand = touched & (close[a:b] < s.zone_low)
+        # Right shoulder must reach the zone mid; a poke at the zone edge does not count.
+        reached_mid = np.maximum.accumulate(h >= mid)
+        cand = reached_mid & (close[a:b] < s.zone_low)
         j = _first_true(cand)
         c = _first_true(h >= stop)
         if j < 0 or (0 <= c <= j):
@@ -292,14 +400,14 @@ def simulate(
     Expiry, min-risk, direction and one-position-at-a-time are applied later in
     ``evaluate`` so the expensive part runs once.
     """
-    h0, l0, c0 = (df[c].to_numpy(dtype=float) for c in ("high", "low", "close"))
+    o0, h0, l0, c0 = (df[c].to_numpy(dtype=float) for c in ("open", "high", "low", "close"))
     atr = atr_wilder(h0, l0, c0)
     # Longs are shorts on the price-negated series.
-    spaces = {"short": (h0, l0, c0, 1.0), "long": (-l0, -h0, -c0, -1.0)}
+    spaces = {"short": (o0, h0, l0, c0, 1.0), "long": (-o0, -l0, -h0, -c0, -1.0)}
     rows = []
     for pl in pivot_lens:
-        for direction, (h, l, c, sign) in spaces.items():
-            for s in detect_setups(h, l, c, atr, pl, direction, max_pattern_bars):
+        for direction, (o, h, l, c, sign) in spaces.items():
+            for s in detect_setups(o, h, l, c, atr, pl, direction, max_pattern_bars):
                 for mode in entries:
                     for buf in stop_buffers:
                         stop = s.head + buf * s.atr
@@ -326,11 +434,11 @@ def simulate(
                             rows.append(
                                 (pl, mode, buf, r_mult, direction, s.msb_idx, e_idx - s.msb_idx, e_idx, x_idx,
                                  sign * e_px, sign * stop, sign * x_px, risk / entry_abs * 100, reason, gross,
-                                 gross - (entry_fee + exit_fee) / risk, s.ls_idx, s.head_idx)
+                                 gross - (entry_fee + exit_fee) / risk, s.ls_idx, s.pb_idx, s.head_idx)
                             )
     cols = ["pivot_len", "entry", "stop_buffer_atr", "target_r", "direction", "msb_idx", "bars_to_entry",
             "entry_idx", "exit_idx", "entry_px", "stop_px", "exit_px", "risk_pct", "reason", "r_gross", "r_net",
-            "ls_idx", "head_idx"]
+            "ls_idx", "pb_idx", "head_idx"]
     trades = pd.DataFrame(rows, columns=cols)
     if len(trades):
         trades["entry_time"] = df["datetime"].to_numpy()[trades["entry_idx"].to_numpy()]
@@ -431,9 +539,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     p = argparse.ArgumentParser(description="H&S pivot-block backtest + optimiser")
     src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--download", action="store_true", help="Binance spot klines (cached under data/)")
+    src.add_argument("--download", action="store_true", help="exchange spot klines (cached under data/)")
     src.add_argument("--csv", type=str, help="OHLC CSV (e.g. TradingView export)")
     src.add_argument("--synthetic", action="store_true", help="Random-walk smoke test (meaningless results)")
+    p.add_argument("--exchange", choices=("bybit", "binance"), default="bybit", help="--download source (spot)")
     p.add_argument("--symbol", default="BTCUSDT")
     p.add_argument("--interval", default="5m")
     p.add_argument("--start", default="2022-01-01")
@@ -447,7 +556,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = p.parse_args(argv)
 
     if args.download:
-        df = download_binance(args.symbol, args.interval, args.start, args.end)
+        fetch = download_bybit if args.exchange == "bybit" else download_binance
+        df = fetch(args.symbol, args.interval, args.start, args.end)
     elif args.csv:
         df = load_csv(args.csv)
     else:
