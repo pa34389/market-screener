@@ -28,7 +28,7 @@ import pandas as pd
 from hs_backtest import DATA_DIR, GRID, cache_path, load_csv, select_trades, stats
 
 ORDINAL = ("pivot_len", "stop_buffer_atr", "expiry", "min_risk_pct", "target_r")
-CATEGORICAL = ("entry", "direction")
+CATEGORICAL = ("entry", "direction", "killzone")
 KEYS = list(GRID)
 
 # Reference palette (dataviz skill): categorical slots 1-3, diverging blue<->red, light surface.
@@ -75,7 +75,7 @@ def config_trades(trades: pd.DataFrame, cfg: Dict) -> pd.DataFrame:
 
 def fmt_cfg(cfg: Dict) -> str:
     return (f"{cfg['direction']} {cfg['entry']} piv{cfg['pivot_len']} buf{cfg['stop_buffer_atr']} "
-            f"exp{cfg['expiry']} minrisk{cfg['min_risk_pct']} {cfg['target_r']:.0f}R")
+            f"exp{cfg['expiry']} minrisk{cfg['min_risk_pct']} {cfg['target_r']:.0f}R kz:{cfg['killzone']}")
 
 
 def marginal(ok: pd.DataFrame, by: str) -> pd.DataFrame:
@@ -220,7 +220,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(robust[cols].head(args.top).to_string(index=False, float_format=ff) if len(robust) else "  none")
     print()
 
-    for by in ("target_r", "entry", "direction", "pivot_len", "stop_buffer_atr", "expiry", "min_risk_pct"):
+    for by in ("killzone", "target_r", "entry", "direction", "pivot_len", "stop_buffer_atr", "expiry", "min_risk_pct"):
         print(f"By {by} (configs with >= {args.min_trades} IS & OOS trades):")
         print(marginal(ok, by).to_string(float_format=ff))
         print()

@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 
 import hs_backtest
-from hs_backtest import (Fees, GRID, atr_wilder, detect_setups, download_bybit, evaluate, find_entry, load_csv,
-                         pivot_block, pivot_highs, resolve_exits, simulate, synthetic_ohlcv, trades_path)
+from hs_backtest import (Fees, GRID, atr_wilder, detect_setups, download_bybit, evaluate, find_entry, killzone_of,
+                         load_csv, pivot_block, pivot_highs, resolve_exits, simulate, synthetic_ohlcv, trades_path)
 
 REFERENCE_CSV = Path(__file__).resolve().parent / "testdata" / "bybit_btcusdt_5m_2026-10-15.csv"
 
@@ -126,7 +126,7 @@ class TestShort(unittest.TestCase):
     def test_expiry_filters(self) -> None:
         t = _run(BEAR_HS + _falling(101, 15))
         grid = dict(GRID, pivot_len=(2,), stop_buffer_atr=(0.0,), target_r=(3.0,), expiry=(1, 3),
-                    min_risk_pct=(0.0,), direction=("short",))
+                    min_risk_pct=(0.0,), direction=("short",), killzone=("any",))
         res = evaluate(t, split_idx=10_000, grid=grid).set_index(["entry", "expiry"])
         self.assertEqual(res.loc[("mid", 1)].is_trades, 0)  # mid fill is 2 bars after the MSB
         self.assertEqual(res.loc[("mid", 3)].is_trades, 1)
@@ -173,6 +173,26 @@ class TestOutputs(unittest.TestCase):
                 got = load_csv(path)
                 self.assertEqual(list(got.datetime), list(df.datetime))
                 self.assertEqual(list(got.close), list(df.close))
+
+
+class TestKillzones(unittest.TestCase):
+    def test_labels_follow_new_york_time_with_dst(self) -> None:
+        t = pd.DatetimeIndex(["2024-01-15 07:00", "2024-07-15 06:00", "2024-07-15 05:55", "2024-07-15 17:35",
+                              "2024-07-15 20:00", "2024-01-16 01:00", "2024-07-15 14:05"], tz="UTC")
+        # EST 02:00 london | EDT 02:00 london | EDT 01:55 none | EDT 13:35 ny_pm | EDT 16:00 none (end exclusive)
+        # | EST 20:00 asia | EDT 10:05 london_close
+        self.assertEqual(list(killzone_of(t)), ["london", "london", "", "ny_pm", "", "asia", "london_close"])
+
+    def test_filter_skips_entries_outside_the_zone(self) -> None:
+        # BEAR_HS entries (2024-01-01 00:55 / 01:00 UTC = 19:55 / 20:00 EST): mid is outside Asia, close is inside.
+        t = _run(BEAR_HS + _falling(101, 15))
+        grid = dict(GRID, pivot_len=(2,), stop_buffer_atr=(0.0,), target_r=(3.0,), expiry=(192,),
+                    min_risk_pct=(0.0,), direction=("short",), killzone=("any", "asia", "london"))
+        res = evaluate(t, split_idx=10_000, grid=grid).set_index(["entry", "killzone"])
+        self.assertEqual(res.loc[("mid", "any")].is_trades, 1)
+        self.assertEqual(res.loc[("mid", "asia")].is_trades, 0)
+        self.assertEqual(res.loc[("close", "asia")].is_trades, 1)
+        self.assertEqual(res.loc[("close", "london")].is_trades, 0)
 
 
 class TestReferenceTrade(unittest.TestCase):
@@ -224,6 +244,11 @@ class TestReferenceTrade(unittest.TestCase):
         t = t[(t.direction == "short") & (t.head_idx == self.at("03:05"))].set_index("entry")
         self.assertEqual(set(t.reason), {"target"})
         self.assertAlmostEqual(t.loc["close"].r_gross, 4.0)
+
+    def test_reference_entry_is_outside_every_killzone(self) -> None:
+        # 06:35 AEST = 16:35 New York (EDT): after the NY PM killzone closes.
+        e_time = self.df.datetime.iloc[self.at("06:35")]
+        self.assertEqual(killzone_of(pd.DatetimeIndex([e_time]))[0], "")
 
     def test_no_lookahead(self) -> None:
         full = self.setup_for_head(3)
@@ -289,6 +314,17 @@ class TestBybitDownload(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(hs_backtest, "DATA_DIR", Path(d)):
             df = download_bybit(start="2024-01-01", end="2024-01-01 00:45", session=fake, retry_wait=0)
         self.assertEqual(len(df), 10)
+
+
+class TestPatternAnalysis(unittest.TestCase):
+    def test_mfe_stops_counting_at_the_stop_bar(self) -> None:
+        from hs_patterns import mfe_before_stop
+
+        h = np.array([100.0, 100.5, 99.0, 103.0, 99.0])
+        l = np.array([99.0, 97.0, 95.0, 90.0, 80.0])  # bar 3 hits the stop (103) and also trades to 90
+        self.assertAlmostEqual(mfe_before_stop(h, l, 1, 100.0, 102.0, 100), 5.0)  # only bars 1-2 count
+        self.assertAlmostEqual(mfe_before_stop(h, l, 3, 100.0, 102.0, 100), 0.0)  # stopped on the first bar
+        self.assertAlmostEqual(mfe_before_stop(h, l, 4, 100.0, 102.0, 100), 20.0)  # never stopped
 
 
 class TestSmoke(unittest.TestCase):
