@@ -157,6 +157,10 @@ def build(df: pd.DataFrame, pivot_len: int, entry_mode: str, buf: float, expiry:
                 "trend_1d": (e2[p] - c[p]) / px * 100,
                 "move_24h": (c[p - day] - c[p]) / px * 100 if p >= day else np.nan,
                 "mfe_flip_r": mfe_flip / risk,
+                # Setup internals (price-space values; longs are negated) for downstream feature work.
+                "ls_idx": s.ls_idx, "pb_idx": s.pb_idx, "head_idx": s.head_idx, "msb_idx": s.msb_idx,
+                "zone_low_s": s.zone_low, "zone_high_s": s.zone_high, "head_s": s.head, "neckline_s": s.neckline,
+                "entry_s": e_px, "stop_s": stop, "atr_msb": s.atr,
                 # Stretch (+ = extended in the direction a reversal trade fades)
                 "stretch_z": sign * (c0[p] - ctx["sma"][p]) / ctx["sd"][p] if ctx["sd"][p] > 0 else np.nan,
                 "vwap_atr": sign * (c0[p] - ctx["vwap"][p]) / atr[p],
